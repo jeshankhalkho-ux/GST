@@ -131,7 +131,7 @@ def _timer():
 
 @app.after_request
 def _log(response):
-    ms = round((time.perf_counter() - g.t0) * 1000, 1)
+    ms = round((time.perf_counter() - g.get("t0", time.perf_counter())) * 1000, 1)
     logger.info("%s %s → %d [%sms]", request.method, request.path, response.status_code, ms)
     return response
 
