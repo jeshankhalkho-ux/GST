@@ -18,12 +18,17 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # ── Config ────────────────────────────────────────────────────────────────────
-GST_API_URL      = os.getenv("GST_API_URL", "")
-GST_API_KEY      = os.getenv("GST_API_KEY", "")
-PORT             = int(os.getenv("PORT", 5000))
-DEBUG            = os.getenv("DEBUG", "false").lower() == "true"
-MOCK_MODE        = os.getenv("MOCK_MODE", "false").lower() == "true"
-REQUEST_TIMEOUT  = int(os.getenv("REQUEST_TIMEOUT", 15))
+GST_API_URL        = os.getenv("GST_API_URL", "")
+GST_API_KEY        = os.getenv("GST_API_KEY", "")
+UMANG_TKN          = os.getenv("UMANG_TKN", "")
+UMANG_TRKR         = os.getenv("UMANG_TRKR", "")
+UMANG_USRID        = os.getenv("UMANG_USRID", "")
+UMANG_DEPTID       = os.getenv("UMANG_DEPTID", "63")
+UMANG_SRVID        = os.getenv("UMANG_SRVID", "559")
+PORT               = int(os.getenv("PORT", 5000))
+DEBUG              = os.getenv("DEBUG", "false").lower() == "true"
+MOCK_MODE          = os.getenv("MOCK_MODE", "false").lower() == "true"
+REQUEST_TIMEOUT    = int(os.getenv("REQUEST_TIMEOUT", 15))
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -176,15 +181,32 @@ def gst_search():
 
     # ── Call upstream ─────────────────────────────────────────────────────────
     try:
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
-        if GST_API_KEY:
-            headers["x-api-key"] = GST_API_KEY
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "x-api-key": GST_API_KEY,
+            "deptid": UMANG_DEPTID,
+            "srvid": UMANG_SRVID,
+        }
+
+        payload = {
+            "tkn": UMANG_TKN,
+            "trkr": UMANG_TRKR,
+            "lang": "en",
+            "usrid": UMANG_USRID,
+            "mode": "web",
+            "pltfrm": "web",
+            "did": None,
+            "deptid": UMANG_DEPTID,
+            "srvid": UMANG_SRVID,
+            "gstin": gstin,
+        }
 
         logger.info("Fetching GSTIN: %s", gstin)
 
-        upstream = requests.get(
+        upstream = requests.post(
             GST_API_URL,
-            params={"gstin": gstin},
+            json=payload,
             headers=headers,
             timeout=REQUEST_TIMEOUT,
         )
