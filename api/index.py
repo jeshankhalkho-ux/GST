@@ -28,6 +28,7 @@ UMANG_SRVID        = os.getenv("UMANG_SRVID", "559")
 PORT               = int(os.getenv("PORT", 5000))
 DEBUG              = os.getenv("DEBUG", "false").lower() == "true"
 MOCK_MODE          = os.getenv("MOCK_MODE", "false").lower() == "true"
+API_AUTH_KEY       = os.getenv("API_AUTH_KEY", "")
 REQUEST_TIMEOUT    = int(os.getenv("REQUEST_TIMEOUT", 15))
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -113,6 +114,17 @@ MOCK_PD = {
 }
 
 # ── Middleware ────────────────────────────────────────────────────────────────
+@app.before_request
+def _auth():
+    if request.method == "OPTIONS":
+        return
+    if request.path in ("/", "/health"):
+        return
+    if API_AUTH_KEY:
+        key = request.headers.get("x-api-key", "")
+        if key != API_AUTH_KEY:
+            return err("GSTN0401", "Invalid or missing API key", 401)
+
 @app.before_request
 def _timer():
     g.t0 = time.perf_counter()
