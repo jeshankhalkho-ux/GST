@@ -121,7 +121,7 @@ def _auth():
     if request.path in ("/", "/health"):
         return
     if API_AUTH_KEY:
-        key = request.headers.get("x-api-key", "")
+        key = request.headers.get("x-api-key", "") or request.args.get("key", "")
         if key != API_AUTH_KEY:
             return err("GSTN0401", "Invalid or missing API key", 401)
 
