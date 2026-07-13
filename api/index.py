@@ -138,6 +138,51 @@ def gst_search():
     if not GST_API_URL:
         return err("GSTN0099", "GST_API_URL is not configured", 500)
 
+    try:
+        headers = {
+            "Accept": "application/json", "Content-Type": "application/json",
+            "x-api-key": GST_API_KEY,
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
+            "subsid": "0", "deptid": UMANG_DEPTID, "tenantid": "", "formtrkr": "0",
+            "srvid": UMANG_SRVID, "subsid2": "0",
+            "origin": "https://web.umang.gov.in",
+            "referer": "https://web.umang.gov.in/",
+        }
+        payload = {
+            "tkn": UMANG_TKN, "trkr": UMANG_TRKR, "lang": "en",
+            "lat": "21", "lon": "90", "lac": "90", "usag": "90",
+            "apitrkr": str(int(time.time())), "usrid": UMANG_USRID,
+            "mode": "web", "pltfrm": "android", "did": "123234",
+            "deptid": UMANG_DEPTID, "formtrkr": "0", "srvid": UMANG_SRVID,
+            "subsid": "0", "subsid2": "0", "trackingId": "",
+            "source": "UMANG", "consumerId": "", "partnerCode": "",
+            "consumerNumber": "", "gstin": gstin,
+        }
+        logger.info("Fetching GSTIN: %s via UMANG", gstin)
+        upstream = requests.post(GST_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
+        upstream.raise_for_status()
+        data = upstream.json()
+        logger.info("UMANG result for %s: %s", gstin, json.dumps(data, indent=2)[:300])
+        decoded = data.get("pd", {}).get("decodedData") or data
+        return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": decoded}), upstream.status_code
+    except requests.Timeout:
+        return err("GSTN0503", "Upstream API timed out", 503)
+    except requests.ConnectionError:
+        return err("GSTN0502", "Cannot connect to upstream GST API", 502)
+    except requests.HTTPError:
+        if upstream.status_code == 503:
+            return err("GSTN0503", "UMANG gateway unavailable (503). Try Indian BizVerify MCP or Sandbox.co.in as alternative.", 503)
+        sc = upstream.status_code
+        return err(f"GSTN0{sc}", f"Upstream returned HTTP {sc}", 502)
+    except ValueError:
+        try:
+            return err("GSTN0503", f"Upstream returned invalid JSON: {upstream.text[:200]}", 502)
+        except:
+            return err("GSTN0503", "Upstream returned invalid JSON", 502)
+    except Exception as e:
+        logger.exception("Unhandled error: %s", e)
+        return err("GSTN0500", "Internal server error", 500)
+
 
 @app.route("/api/gst/returns", methods=["GET", "POST"])
 def gst_returns():
@@ -198,49 +243,6 @@ def gst_returns():
         return err(f"GSTN0{resp.status_code}", f"GST portal returned HTTP {resp.status_code}", 502)
     except ValueError:
         return err("GSTN0503", "GST portal returned invalid JSON", 502)
-    except Exception as e:
-        logger.exception("Unhandled error: %s", e)
-        return err("GSTN0500", "Internal server error", 500)
-
-    try:
-        headers = {
-            "Accept": "application/json", "Content-Type": "application/json",
-            "x-api-key": GST_API_KEY,
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
-            "subsid": "0", "deptid": UMANG_DEPTID, "tenantid": "", "formtrkr": "0",
-            "srvid": UMANG_SRVID, "subsid2": "0",
-            "origin": "https://web.umang.gov.in",
-            "referer": "https://web.umang.gov.in/",
-        }
-        payload = {
-            "tkn": UMANG_TKN, "trkr": UMANG_TRKR, "lang": "en",
-            "lat": "21", "lon": "90", "lac": "90", "usag": "90",
-            "apitrkr": str(int(time.time())), "usrid": UMANG_USRID,
-            "mode": "web", "pltfrm": "android", "did": "123234",
-            "deptid": UMANG_DEPTID, "formtrkr": "0", "srvid": UMANG_SRVID,
-            "subsid": "0", "subsid2": "0", "trackingId": "",
-            "source": "UMANG", "consumerId": "", "partnerCode": "",
-            "consumerNumber": "", "gstin": gstin,
-        }
-        logger.info("Fetching GSTIN: %s via UMANG", gstin)
-        upstream = requests.post(GST_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
-        upstream.raise_for_status()
-        data = upstream.json()
-        logger.info("UMANG result for %s: %s", gstin, json.dumps(data, indent=2)[:300])
-        decoded = data.get("pd", {}).get("decodedData") or data
-        return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": decoded}), upstream.status_code
-    except requests.Timeout:
-        return err("GSTN0503", "Upstream API timed out", 503)
-    except requests.ConnectionError:
-        return err("GSTN0502", "Cannot connect to upstream GST API", 502)
-    except requests.HTTPError:
-        sc = upstream.status_code
-        return err(f"GSTN0{sc}", f"Upstream returned HTTP {sc}", 502)
-    except ValueError:
-        try:
-            return err("GSTN0503", f"Upstream returned invalid JSON: {upstream.text[:200]}", 502)
-        except:
-            return err("GSTN0503", "Upstream returned invalid JSON", 502)
     except Exception as e:
         logger.exception("Unhandled error: %s", e)
         return err("GSTN0500", "Internal server error", 500)
