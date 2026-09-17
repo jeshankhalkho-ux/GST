@@ -1,14 +1,7 @@
-# API Monitor Logger Client (Python/Flask)
-# Usage:
-#   from logger import create_logger
-#   log = create_logger('https://your-monitor.vercel.app', 'Vehicle API', 'Vehicle')
-#   app = Flask(__name__)
-#   app.before_request(log.before_request)
-#   app.after_request(log.after_request)
-
+# API Monitor Logger Client (Python/Flask) — Vercel-compatible
 import time
-import threading
 import requests
+from flask import request as flask_request
 
 LOG_ENDPOINT = 'https://api-monitor-jeshankhalkho-ux.vercel.app'
 
@@ -17,34 +10,30 @@ class MonitorLogger:
         self.endpoint = endpoint or LOG_ENDPOINT
         self.api_name = api_name
         self.category = category
-        self._local = threading.local()
+        self._start = 0
 
     def _send(self, entry):
         try:
-            threading.Thread(
-                target=lambda: requests.post(
-                    f"{self.endpoint}/api/log",
-                    json=entry,
-                    timeout=5
-                ),
-                daemon=True
-            ).start()
+            requests.post(f"{self.endpoint}/api/log", json=entry, timeout=3)
         except:
             pass
 
     def before_request(self):
-        self._local.start = time.time()
-        self._local.method = None
-        self._local.path = None
+        self._start = time.time()
 
     def after_request(self, response):
-        elapsed = int((time.time() - getattr(self._local, 'start', time.time())) * 1000)
-        from flask import request
+        elapsed = int((time.time() - self._start) * 1000)
+        try:
+            method = flask_request.method
+            path = flask_request.path
+        except:
+            method = '?'
+            path = '/'
         self._send({
             'apiName': self.api_name,
             'category': self.category,
-            'method': request.method,
-            'path': request.path,
+            'method': method,
+            'path': path,
             'status': response.status_code,
             'responseTime': elapsed,
             'status': 'error' if response.status_code >= 400 else 'healthy',
@@ -63,19 +52,6 @@ class MonitorLogger:
             'status': 'error' if status >= 400 else 'healthy',
             'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime()),
             **kwargs,
-        })
-
-    def error(self, path='/', error=None, response_time=0):
-        self._send({
-            'apiName': self.api_name,
-            'category': self.category,
-            'method': 'ERROR',
-            'path': path,
-            'status': 500,
-            'responseTime': response_time,
-            'status': 'error',
-            'errorMessage': str(error)[:200] if error else '',
-            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime()),
         })
 
 
