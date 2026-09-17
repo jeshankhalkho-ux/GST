@@ -8,7 +8,6 @@ import requests
 import urllib3
 urllib3.disable_warnings()
 from flask import Flask, g, jsonify, request
-from logger import create_logger
 
 try:
     from flask_cors import CORS
@@ -20,9 +19,17 @@ app = Flask(__name__)
 if _cors_available:
     CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-monlog = create_logger(api_name='GST API', category='GST')
-app.before_request(monlog.before_request)
-app.after_request(monlog.after_request)
+# --- API Monitor Logger ---
+MONITOR_URL = "https://api-monitor-jeshankhalkho-ux.vercel.app"
+_log_t = [0]
+@app.before_request
+def _ml_before(): _log_t[0] = time.time()
+@app.after_request
+def _ml_after(r):
+    try: requests.post(f"{MONITOR_URL}/api/log", json={"apiName":"GST API","category":"GST","method":request.method,"path":request.path,"status":r.status_code,"responseTime":int((time.time()-_log_t[0])*1000),"status_":"error" if r.status_code>=400 else "healthy","timestamp":time.strftime("%Y-%m-%dT%H:%M:%S.000Z",time.gmtime())}, timeout=2)
+    except: pass
+    return r
+# --- End Logger ---
 
 MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() == "true"
 
