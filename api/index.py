@@ -8,6 +8,7 @@ import requests
 import urllib3
 urllib3.disable_warnings()
 from flask import Flask, g, jsonify, request
+from logger import create_logger
 
 try:
     from flask_cors import CORS
@@ -18,6 +19,10 @@ except ImportError:
 app = Flask(__name__)
 if _cors_available:
     CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+monlog = create_logger(api_name='GST API', category='GST')
+app.before_request(monlog.before_request)
+app.after_request(monlog.after_request)
 
 MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() == "true"
 
