@@ -20,7 +20,7 @@ if _cors_available:
     CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # --- API Monitor Logger ---
-MONITOR_URL = "https://api-monitor-jeshankhalkho-ux.vercel.app"
+MONITOR_URL = "https://api-monitor-teal.vercel.app"
 _log_t = [0]
 @app.before_request
 def _ml_before(): _log_t[0] = time.time()
