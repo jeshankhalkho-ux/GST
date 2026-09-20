@@ -1,12 +1,9 @@
 import os
 import re
-import json
 import time
 import logging
 
 import requests
-import urllib3
-urllib3.disable_warnings()
 from flask import Flask, g, jsonify, request
 
 try:
@@ -33,13 +30,7 @@ def _ml_after(r):
 
 MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() == "true"
 
-GST_API_URL        = os.getenv("GST_API_URL", "https://apigw.umangapp.in/gstApi/ws1/search")
-GST_API_KEY        = os.getenv("GST_API_KEY", "VKE9PnbY5k1ZYapR5PyYQ33I26sXTX569Ed7eqyg")
-UMANG_TKN          = os.getenv("UMANG_TKN", "iad1cc7d81-1533-44b0-9967-35599386d3df/2")
-UMANG_TRKR         = os.getenv("UMANG_TRKR", "213132")
-UMANG_USRID        = os.getenv("UMANG_USRID", "09")
-UMANG_DEPTID       = os.getenv("UMANG_DEPTID", "63")
-UMANG_SRVID        = os.getenv("UMANG_SRVID", "559")
+CLEARTAX_BASE      = os.getenv("CLEARTAX_BASE", "https://cleartax.in")
 PORT               = int(os.getenv("PORT", 5000))
 DEBUG              = os.getenv("DEBUG", "false").lower() == "true"
 API_AUTH_KEY       = os.getenv("API_AUTH_KEY", "")
@@ -118,8 +109,8 @@ def index():
             "root": "GET /", "health": "GET /health",
             "gst_search": "GET /api/gst/search?gstin=<GSTIN>",
             "gst_post":   "POST /api/gst/search  {\"gstin\": \"<GSTIN>\"}",
-            "gst_returns_get":  "GET /api/gst/returns?gstin=<GSTIN>&fy=<FY>",
-            "gst_returns_post": "POST /api/gst/returns  {\"gstin\": \"<GSTIN>\", \"fy\": \"<FY>\"}",
+            "gst_by_name": "GET /api/gst/search-by-name?name=<business_name>",
+            "gst_returns": "GET /api/gst/returns?gstin=<GSTIN>&fy=<FY>",
         },
     })
 
@@ -127,6 +118,10 @@ def index():
 def health():
     return jsonify({"status": "ok", "service": "gst-lookup", "mock_mode": MOCK_MODE})
 
+
+# ============================================================
+# GST Search — expressgst.com (primary) + Cleartax (fallback)
+# ============================================================
 @app.route("/api/gst/search", methods=["GET", "POST"])
 def gst_search():
     if request.method == "GET":
@@ -147,59 +142,77 @@ def gst_search():
         pd = {**MOCK_PD, "decodedData": {**MOCK_DECODED, "gstin": gstin}}
         return ok(pd)
 
-    # --- Source: expressgst.com ---
+    # --- Source 1: expressgst.com ---
     try:
         sess = requests.Session()
         sess.headers.update({
             "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-IN,en;q=0.8",
         })
-        # Step 1: Load page to get gpc_id
         init = sess.get("https://www.expressgst.com/gst-number-search", timeout=REQUEST_TIMEOUT)
         init.raise_for_status()
-        import re as _re
-        gpc_match = _re.search(r'gpc_id[=:]\s*["\']?([a-zA-Z0-9_-]+)', init.text)
-        if not gpc_match:
-            return err("GSTN0502", "Could not obtain session ID from expressgst.com", 502)
-        gpc_id = gpc_match.group(1)
-        logger.info("Got gpc_id: %s", gpc_id)
+        gpc_match = re.search(r'gpc_id[=:]\s*["\']?([a-zA-Z0-9_-]+)', init.text)
+        if gpc_match:
+            gpc_id = gpc_match.group(1)
+            logger.info("expressgst gpc_id: %s", gpc_id)
+            resp = sess.get(
+                "https://appnw.expressgst.com/api/v1/public/gstportal/public-search-by-gstin/detail",
+                params={"gpc_id": gpc_id, "gst_number": gstin},
+                headers={
+                    "Accept": "*/*",
+                    "Origin": "https://www.expressgst.com",
+                    "Referer": "https://www.expressgst.com/",
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data and not data.get("error"):
+                logger.info("expressgst OK for %s", gstin)
+                return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": data}), 200
+            logger.info("expressgst no data for %s, trying Cleartax", gstin)
+    except Exception as e:
+        logger.warning("expressgst failed: %s", e)
 
-        # Step 2: Search
-        search_url = f"https://appnw.expressgst.com/api/v1/public/gstportal/public-search-by-gstin/detail"
-        params = {"gpc_id": gpc_id, "gst_number": gstin}
+    # --- Source 2: Cleartax (fallback) ---
+    try:
+        url = f"{CLEARTAX_BASE}/f/compliance-report/{gstin}/"
         headers = {
-            "Accept": "*/*",
-            "Origin": "https://www.expressgst.com",
-            "Referer": "https://www.expressgst.com/",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Referer": f"{CLEARTAX_BASE}/gst-number-search/",
         }
-        resp = sess.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+        logger.info("Fetching GSTIN: %s via Cleartax", gstin)
+        resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
-        logger.info("expressgst result for %s: %s", gstin, json.dumps(data, indent=2)[:300])
+        logger.info("Cleartax result for %s: sts=%s", gstin, data.get("taxpayerInfo", {}).get("sts"))
         return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": data}), 200
     except requests.Timeout:
-        return err("GSTN0503", "Upstream API timed out", 503)
+        return err("GSTN0503", "All upstream APIs timed out", 503)
     except requests.ConnectionError:
-        return err("GSTN0502", "Cannot connect to expressgst.com", 502)
+        return err("GSTN0502", "Cannot connect to upstream GST APIs", 502)
     except requests.HTTPError:
-        sc = resp.status_code if resp else 500
-        return err(f"GSTN0{sc}", f"expressgst.com returned HTTP {sc}", 502)
+        sc = resp.status_code
+        return err(f"GSTN0{sc}", f"Upstream returned HTTP {sc}", 502)
+    except ValueError:
+        return err("GSTN0503", "Upstream returned invalid JSON", 502)
     except Exception as e:
         logger.exception("Unhandled error: %s", e)
         return err("GSTN0500", "Internal server error", 500)
 
 
+# ============================================================
+# GST Returns — GST Portal
+# ============================================================
 @app.route("/api/gst/returns", methods=["GET", "POST"])
 def gst_returns():
     if request.method == "GET":
         gstin = request.args.get("gstin", "").strip().upper()
-        fy    = request.args.get("fy", "").strip()
+        fy = request.args.get("fy", "").strip()
     else:
         body = request.get_json(silent=True) or {}
         gstin = body.get("gstin", "").strip().upper()
-        fy    = body.get("fy", "").strip()
+        fy = body.get("fy", "").strip()
 
     if not gstin:
         return err("GSTN0001", "GSTIN is required")
@@ -207,7 +220,7 @@ def gst_returns():
     if not valid:
         return err("GSTN0002", msg)
     if not fy:
-        return err("GSTN0003", "Financial year (fy) is required, e.g. 2022-2023 or 2022")
+        return err("GSTN0003", "Financial year (fy) is required, e.g. 2023-2024 or 2023")
 
     if len(fy) == 4:
         y = int(fy)
@@ -220,7 +233,7 @@ def gst_returns():
         })
         init = sess.get("https://services.gst.gov.in/services/searchtp", timeout=REQUEST_TIMEOUT)
         init.raise_for_status()
-        logger.info("GST session obtained: %s", init.cookies)
+        logger.info("GST returns session obtained")
 
         payload = {"gstin": gstin, "fy": fy}
         headers = {
@@ -228,12 +241,6 @@ def gst_returns():
             "Content-Type": "application/json;charset=UTF-8",
             "Origin": "https://services.gst.gov.in",
             "Referer": "https://services.gst.gov.in/services/searchtp",
-            "sec-ch-ua": '"Brave";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
-            "sec-ch-ua-mobile": "?1",
-            "sec-ch-ua-platform": '"Android"',
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Dest": "empty",
         }
         resp = sess.post(
             "https://services.gst.gov.in/services/api/search/taxpayerReturnDetails",
@@ -241,18 +248,52 @@ def gst_returns():
         )
         resp.raise_for_status()
         data = resp.json()
-        return jsonify(data), resp.status_code
+        return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": data}), 200
     except requests.Timeout:
         return err("GSTN0503", "GST portal timed out", 503)
     except requests.ConnectionError:
         return err("GSTN0502", "Cannot connect to GST portal", 502)
     except requests.HTTPError:
-        return err(f"GSTN0{resp.status_code}", f"GST portal returned HTTP {resp.status_code}", 502)
+        sc = resp.status_code
+        return err(f"GSTN0{sc}", f"GST portal returned HTTP {sc}", 502)
     except ValueError:
-        return err("GSTN0503", "GST portal returned invalid JSON", 502)
+        return err("GSTN0503", f"GST portal returned invalid JSON: {resp.text[:200]}", 502)
     except Exception as e:
-        logger.exception("Unhandled error: %s", e)
+        logger.exception("Returns error: %s", e)
         return err("GSTN0500", "Internal server error", 500)
+
+
+# ============================================================
+# Search by Name — Masters India
+# ============================================================
+@app.route("/api/gst/search-by-name")
+def gst_search_by_name():
+    name = request.args.get("name", "").strip()
+    if not name or len(name) < 3:
+        return err("GSTN0004", "Name must be at least 3 characters")
+
+    try:
+        url = "https://blog-backend.mastersindia.co/api/v1/custom/search/name_and_pan/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.mastersindia.co",
+            "Referer": "https://www.mastersindia.co/gst-number-search-by-name-and-pan/",
+        }
+        resp = requests.get(url, params={"keyword": name}, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": data}), 200
+    except requests.Timeout:
+        return err("GSTN0503", "Masters India API timed out", 503)
+    except (requests.ConnectionError, requests.HTTPError):
+        return err("GSTN0502", "Failed to fetch from Masters India", 502)
+    except ValueError:
+        return err("GSTN0503", "Invalid JSON from Masters India", 502)
+    except Exception as e:
+        logger.exception("Name search error: %s", e)
+        return err("GSTN0500", "Internal server error", 500)
+
 
 @app.errorhandler(404)
 def not_found(_):
