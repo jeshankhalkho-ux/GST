@@ -147,50 +147,45 @@ def gst_search():
         pd = {**MOCK_PD, "decodedData": {**MOCK_DECODED, "gstin": gstin}}
         return ok(pd)
 
-    if not GST_API_URL:
-        return err("GSTN0099", "GST_API_URL is not configured", 500)
-
+    # --- Source: expressgst.com ---
     try:
+        sess = requests.Session()
+        sess.headers.update({
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-IN,en;q=0.8",
+        })
+        # Step 1: Load page to get gpc_id
+        init = sess.get("https://www.expressgst.com/gst-number-search", timeout=REQUEST_TIMEOUT)
+        init.raise_for_status()
+        import re as _re
+        gpc_match = _re.search(r'gpc_id[=:]\s*["\']?([a-zA-Z0-9_-]+)', init.text)
+        if not gpc_match:
+            return err("GSTN0502", "Could not obtain session ID from expressgst.com", 502)
+        gpc_id = gpc_match.group(1)
+        logger.info("Got gpc_id: %s", gpc_id)
+
+        # Step 2: Search
+        search_url = f"https://appnw.expressgst.com/api/v1/public/gstportal/public-search-by-gstin/detail"
+        params = {"gpc_id": gpc_id, "gst_number": gstin}
         headers = {
-            "Accept": "application/json", "Content-Type": "application/json",
-            "x-api-key": GST_API_KEY,
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
-            "subsid": "0", "deptid": UMANG_DEPTID, "tenantid": "", "formtrkr": "0",
-            "srvid": UMANG_SRVID, "subsid2": "0",
-            "origin": "https://web.umang.gov.in",
-            "referer": "https://web.umang.gov.in/",
+            "Accept": "*/*",
+            "Origin": "https://www.expressgst.com",
+            "Referer": "https://www.expressgst.com/",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
         }
-        payload = {
-            "tkn": UMANG_TKN, "trkr": UMANG_TRKR, "lang": "en",
-            "lat": "21", "lon": "90", "lac": "90", "usag": "90",
-            "apitrkr": str(int(time.time())), "usrid": UMANG_USRID,
-            "mode": "web", "pltfrm": "android", "did": "123234",
-            "deptid": UMANG_DEPTID, "formtrkr": "0", "srvid": UMANG_SRVID,
-            "subsid": "0", "subsid2": "0", "trackingId": "",
-            "source": "UMANG", "consumerId": "", "partnerCode": "",
-            "consumerNumber": "", "gstin": gstin,
-        }
-        logger.info("Fetching GSTIN: %s via UMANG", gstin)
-        upstream = requests.post(GST_API_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT, verify=False)
-        upstream.raise_for_status()
-        data = upstream.json()
-        logger.info("UMANG result for %s: %s", gstin, json.dumps(data, indent=2)[:300])
-        decoded = data.get("pd", {}).get("decodedData") or data
-        return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": decoded}), upstream.status_code
+        resp = sess.get(search_url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info("expressgst result for %s: %s", gstin, json.dumps(data, indent=2)[:300])
+        return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": data}), 200
     except requests.Timeout:
         return err("GSTN0503", "Upstream API timed out", 503)
     except requests.ConnectionError:
-        return err("GSTN0502", "Cannot connect to upstream GST API", 502)
+        return err("GSTN0502", "Cannot connect to expressgst.com", 502)
     except requests.HTTPError:
-        if upstream.status_code == 503:
-            return err("GSTN0503", "UMANG gateway unavailable (503). Try Indian BizVerify MCP or Sandbox.co.in as alternative.", 503)
-        sc = upstream.status_code
-        return err(f"GSTN0{sc}", f"Upstream returned HTTP {sc}", 502)
-    except ValueError:
-        try:
-            return err("GSTN0503", f"Upstream returned invalid JSON: {upstream.text[:200]}", 502)
-        except:
-            return err("GSTN0503", "Upstream returned invalid JSON", 502)
+        sc = resp.status_code if resp else 500
+        return err(f"GSTN0{sc}", f"expressgst.com returned HTTP {sc}", 502)
     except Exception as e:
         logger.exception("Unhandled error: %s", e)
         return err("GSTN0500", "Internal server error", 500)
