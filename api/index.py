@@ -1,4 +1,4 @@
-import os, json, logging, time, base64, re
+import os, json, logging, time, re
 from flask import Flask, request, jsonify
 import requests as req
 
@@ -10,7 +10,10 @@ API_KEY     = os.getenv("API_KEY", "743386f24c7c22419b39bd1595b03efc")
 CORS_ALLOW  = os.getenv("CORS_ALLOW", "*")
 LOG_FILE    = os.getenv("LOG_FILE", "gst.log")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
-CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "")
+
+# Free API keys (sign up at these sites to get your own)
+APPYFLOW_KEY    = os.getenv("APPYFLOW_KEY", "")      # https://appyflow.in/verify-gst/
+GSTINCHECK_KEY  = os.getenv("GSTINCHECK_KEY", "")    # https://gstincheck.co.in/
 
 app = Flask(__name__)
 logger = logging.getLogger("gst-api")
@@ -34,7 +37,7 @@ def add_cors(resp):
 def catch_all(path):
     if request.method == "OPTIONS":
         return "", 204
-    return ok({"msg": "GST API is running", "endpoints": ["/api/gst/search?gstin=...", "/api/gst/search?pan=...", "/api/gst/returns?gstin=...", "/api/gst/search-by-name?name=..."]})
+    return ok({"msg": "GST API is running", "endpoints": ["/api/gst/search?gstin=...", "/api/gst/returns?gstin=...", "/api/gst/search-by-name?name=..."]})
 
 # ──────────────────────────────────────────
 # Monitor logging
@@ -64,54 +67,22 @@ def validate_gstin(gstin):
         return False, "Invalid GSTIN format"
     return True, ""
 
-# ──────────────────────────────────────────
-# CAPTCHA solver via capsolver
-# ──────────────────────────────────────────
-def solve_captcha(base64_image):
-    """Send CAPTCHA image to capsolver and return solution text."""
-    if not CAPTCHA_API_KEY:
-        logger.warning("No CAPTCHA_API_KEY set, cannot solve CAPTCHA")
-        return None
-
-    try:
-        # Create task
-        create_resp = req.post("https://api.capsolver.com/createTask", json={
-            "clientKey": CAPTCHA_API_KEY,
-            "task": {
-                "type": "ImageToTextTask",
-                "body": base64_image,
-                "CapKey": "EAED8C78-814D-4A18-B2E2-B03C02043297",
-            }
-        }, timeout=30)
-        create_data = create_resp.json()
-
-        if create_data.get("errorId"):
-            logger.error("capsolver createTask error: %s", create_data.get("errorDescription"))
-            return None
-
-        task_id = create_data.get("taskId")
-        if not task_id:
-            return None
-
-        # Poll for result
-        for _ in range(30):
-            time.sleep(3)
-            result_resp = req.post("https://api.capsolver.com/getTaskResult", json={
-                "clientKey": CAPTCHA_API_KEY,
-                "taskId": task_id,
-            }, timeout=30)
-            result_data = result_resp.json()
-
-            if result_data.get("status") == "ready":
-                solution = result_data.get("solution", {}).get("text")
-                logger.info("CAPTCHA solved: %s", solution)
-                return solution
-
-        logger.error("capsolver timeout waiting for result")
-        return None
-    except Exception as e:
-        logger.error("CAPTCHA solver error: %s", e)
-        return None
+def flatten_cleartax(data):
+    """Flatten Cleartax response to standard format"""
+    info = data.get("taxpayerInfo", {})
+    return {
+        "gstin": info.get("gstin", ""),
+        "legal_name": info.get("lgnm", ""),
+        "trade_name": info.get("tradeNam", ""),
+        "gstin_status": info.get("sts", ""),
+        "taxpayer_type": info.get("dty", ""),
+        "constitution_of_business": info.get("ctb", ""),
+        "registration_date": info.get("rgdt", ""),
+        "cancellation_date": info.get("cxdt", ""),
+        "state": info.get("stj", ""),
+        "pan": info.get("pan", ""),
+        "filing": data.get("filing", []),
+    }
 
 # ──────────────────────────────────────────
 # Routes
@@ -131,56 +102,47 @@ def gst_search():
     if not valid:
         return err("GSTN0002", msg)
 
-    # --- Source 1: expressgst.com with CAPTCHA solving ---
-    try:
-        sess = req.Session()
-        sess.headers.update({
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
-        })
+    # --- Source 1: AppyFlow (free, no CAPTCHA) ---
+    if APPYFLOW_KEY:
+        try:
+            url = f"https://appyflow.in/api/verifyGST?gstNo={gstin}&key_secret={APPYFLOW_KEY}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
+                "Accept": "application/json",
+            }
+            logger.info("Fetching GSTIN: %s via AppyFlow", gstin)
+            resp = req.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("taxpayerInfo"):
+                elapsed = time.time() - t0
+                monitor_log("/api/gst/search", 200, elapsed, "appyflow")
+                logger.info("AppyFlow OK for %s (%.1fs)", gstin, elapsed)
+                return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": data}), 200
+        except Exception as e:
+            logger.warning("AppyFlow failed: %s", e)
 
-        # Step 1: Get CAPTCHA
-        captcha_resp = sess.get(
-            "https://appnw.expressgst.com/api/v1/public/gstportal/public-search/captcha",
-            timeout=REQUEST_TIMEOUT,
-        )
-        captcha_resp.raise_for_status()
-        captcha_data = captcha_resp.json()
-        gpc_id = captcha_data.get("data", {}).get("gpc_id")
-        captcha_image_b64 = captcha_data.get("data", {}).get("captcha_image")
+    # --- Source 2: GSTINCheck (free, no CAPTCHA) ---
+    if GSTINCHECK_KEY:
+        try:
+            url = f"https://sheet.gstincheck.co.in/check/{GSTINCHECK_KEY}/{gstin}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
+                "Accept": "application/json",
+            }
+            logger.info("Fetching GSTIN: %s via GSTINCheck", gstin)
+            resp = req.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("data"):
+                elapsed = time.time() - t0
+                monitor_log("/api/gst/search", 200, elapsed, "gstincheck")
+                logger.info("GSTINCheck OK for %s (%.1fs)", gstin, elapsed)
+                return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": data}), 200
+        except Exception as e:
+            logger.warning("GSTINCheck failed: %s", e)
 
-        if not gpc_id or not captcha_image_b64:
-            raise Exception("Failed to get CAPTCHA from expressgst")
-
-        logger.info("expressgst gpc_id: %s", gpc_id)
-
-        # Step 2: Solve CAPTCHA
-        captcha_text = solve_captcha(captcha_image_b64)
-        if not captcha_text:
-            raise Exception("CAPTCHA solving failed")
-
-        # Step 3: Search with solved CAPTCHA
-        resp = sess.get(
-            "https://appnw.expressgst.com/api/v1/public/gstportal/public-search-by-gstin/detail",
-            params={"gpc_id": gpc_id, "captcha_text": captcha_text, "gst_number": gstin},
-            headers={
-                "Accept": "*/*",
-                "Origin": "https://www.expressgst.com",
-                "Referer": "https://www.expressgst.com/",
-            },
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if data and not data.get("error"):
-            elapsed = time.time() - t0
-            monitor_log("/api/gst/search", 200, elapsed, "expressgst")
-            logger.info("expressgst OK for %s (%.1fs)", gstin, elapsed)
-            return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": data}), 200
-        logger.info("expressgst no data for %s, trying Cleartax", gstin)
-    except Exception as e:
-        logger.warning("expressgst failed: %s", e)
-
-    # --- Source 2: Cleartax (fallback) ---
+    # --- Source 3: Cleartax (fallback) ---
     try:
         url = f"https://api.cleartax.in/f/compliance-report/{gstin}/"
         headers = {
@@ -194,7 +156,7 @@ def gst_search():
         data = resp.json()
         elapsed = time.time() - t0
         monitor_log("/api/gst/search", 200, elapsed, "cleartax")
-        logger.info("Cleartax result for %s: sts=%s (%.1fs)", gstin, data.get("taxpayerInfo", {}).get("sts"), elapsed)
+        logger.info("Cleartax OK for %s (%.1fs)", gstin, elapsed)
         return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": data}), 200
     except req.Timeout:
         elapsed = time.time() - t0
@@ -229,35 +191,43 @@ def gst_returns():
     if not fy:
         return err("GSTN0003", "Financial year (fy) is required, e.g. 2024-25")
 
-    # --- Source 1: GST Portal ---
+    # --- Source 1: AppyFlow ---
+    if APPYFLOW_KEY:
+        try:
+            url = f"https://appyflow.in/api/verifyGST?gstNo={gstin}&key_secret={APPYFLOW_KEY}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
+                "Accept": "application/json",
+            }
+            logger.info("Fetching returns for %s (FY %s) via AppyFlow", gstin, fy)
+            resp = req.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            filing = data.get("filing", [])
+            elapsed = time.time() - t0
+            monitor_log("/api/gst/returns", 200, elapsed, "appyflow")
+            logger.info("AppyFlow returns OK for %s (%.1fs)", gstin, elapsed)
+            return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": {"filing": filing}}), 200
+        except Exception as e:
+            logger.warning("AppyFlow returns failed: %s", e)
+
+    # --- Source 2: Cleartax ---
     try:
-        url = "https://services.gst.gov.in/services/api/search/taxpayerByGstin"
+        url = f"https://api.cleartax.in/f/compliance-report/{gstin}/"
         headers = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
             "Accept": "application/json",
-            "Referer": "https://services.gst.gov.in/",
+            "Referer": "https://www.cleartax.in/gst-number-search/",
         }
-        logger.info("Fetching returns for %s (FY %s) via GST Portal", gstin, fy)
-        resp = req.get(url, params={"gstin": gstin}, headers=headers, timeout=REQUEST_TIMEOUT)
+        logger.info("Fetching returns for %s (FY %s) via Cleartax", gstin, fy)
+        resp = req.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
+        filing = data.get("filing", [])
         elapsed = time.time() - t0
-        monitor_log("/api/gst/returns", 200, elapsed, "gst_portal")
-        logger.info("GST Portal returns OK for %s (%.1fs)", gstin, elapsed)
-        return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": data}), 200
-    except req.Timeout:
-        elapsed = time.time() - t0
-        monitor_log("/api/gst/returns", 503, elapsed, "timeout")
-        return err("GSTN0503", "GST Portal timed out", 503)
-    except req.ConnectionError:
-        elapsed = time.time() - t0
-        monitor_log("/api/gst/returns", 502, elapsed, "connection_error")
-        return err("GSTN0502", "Cannot connect to GST Portal", 502)
-    except req.HTTPError:
-        sc = resp.status_code
-        elapsed = time.time() - t0
-        monitor_log("/api/gst/returns", 502, elapsed, "http_error")
-        return err(f"GSTN0{sc}", f"GST Portal returned HTTP {sc}", 502)
+        monitor_log("/api/gst/returns", 200, elapsed, "cleartax")
+        logger.info("Cleartax returns OK for %s (%.1fs)", gstin, elapsed)
+        return jsonify({"rs": "S", "rc": "GSTN0000", "rd": "Success", "pd": {"filing": filing}}), 200
     except Exception as e:
         elapsed = time.time() - t0
         monitor_log("/api/gst/returns", 500, elapsed, "error", str(e))
